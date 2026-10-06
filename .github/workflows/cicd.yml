@@ -1,0 +1,189 @@
+name: CI/CD with Kind
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # --------------------------------------------------
+      # 1. Récupérer le code
+      # --------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------
+      # 2. Créer un cluster Kubernetes temporaire
+      # --------------------------------------------------
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: kind
+          wait: 60s
+
+
+      # --------------------------------------------------
+      # 3. Vérifier le cluster Kubernetes
+      # --------------------------------------------------
+
+      - name: Verify Kind cluster
+        run: |
+          kind get clusters
+          kubectl cluster-info
+          kubectl get nodes
+
+
+      # --------------------------------------------------
+      # 4. Se connecter à GHCR
+      # --------------------------------------------------
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # --------------------------------------------------
+      # 5. Construire l'image Docker
+      # --------------------------------------------------
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ghcr.io/${{ github.repository_owner }}/cours-sysops:${{ github.sha }} \
+            .
+
+
+      # --------------------------------------------------
+      # 6. Publier l'image dans GHCR
+      # --------------------------------------------------
+
+      - name: Push image to GHCR
+        run: |
+          docker push \
+            ghcr.io/${{ github.repository_owner }}/cours-sysops:${{ github.sha }}
+
+
+      # --------------------------------------------------
+      # 7. Créer le namespace Kubernetes
+      # --------------------------------------------------
+
+      - name: Create namespace
+        run: |
+          kubectl apply -f kubernetes/namespace.yaml
+
+
+      # --------------------------------------------------
+      # 8. Déployer la configuration
+      # --------------------------------------------------
+
+      - name: Deploy configuration
+        run: |
+          kubectl apply -f kubernetes/configmap.yaml
+
+          kubectl create secret generic cours-sysops-secret \
+            --from-literal=API_KEY=demo \
+            -n sysops \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+
+      # --------------------------------------------------
+      # 9. Déployer l'application
+      # --------------------------------------------------
+
+      - name: Deploy application
+        run: |
+          kubectl apply -f kubernetes/deployment.yaml
+          kubectl apply -f kubernetes/service.yaml
+
+
+      # --------------------------------------------------
+      # 10. Utiliser l'image publiée dans GHCR
+      # --------------------------------------------------
+
+      - name: Set image
+        run: |
+          kubectl set image deployment/cours-sysops \
+            cours-sysops=ghcr.io/${{ github.repository_owner }}/cours-sysops:${{ github.sha }} \
+            -n sysops
+
+
+      # --------------------------------------------------
+      # 11. Attendre le rollout
+      # --------------------------------------------------
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status \
+            deployment/cours-sysops \
+            -n sysops \
+            --timeout=120s
+
+
+      # --------------------------------------------------
+      # 12. Vérifier les ressources Kubernetes
+      # --------------------------------------------------
+
+      - name: Check Kubernetes resources
+        run: |
+          kubectl get pods -n sysops
+          kubectl get deployment -n sysops
+          kubectl get service -n sysops
+
+
+      # --------------------------------------------------
+      # 13. Vérifier les logs de l'application
+      # --------------------------------------------------
+
+      - name: Check application logs
+        run: |
+          kubectl logs \
+            -n sysops \
+            deployment/cours-sysops
+
+
+      # --------------------------------------------------
+      # 14. Tester l'application
+      # --------------------------------------------------
+
+      - name: Test application
+        run: |
+          kubectl port-forward \
+            -n sysops \
+            svc/cours-sysops \
+            8080:80 \
+            > /tmp/port-forward.log 2>&1 &
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080; then
+              echo "Application is responding"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Application test failed"
+
+          cat /tmp/port-forward.log
+
+          kubectl get pods -n sysops
+
+          kubectl describe pods -n sysops
+
+          exit 1
