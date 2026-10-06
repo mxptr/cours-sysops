@@ -29,4 +29,8 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/cours-sysops:${{ github.sha }}
+          tags: |
+            ghcr.io/mxptr/cours-sysops:${{ github.sha }}
+            ghcr.io/mxptr/cours-sysops:tp2
+          labels: |
+            org.opencontainers.image.source=https://github.com/mxptr/cours-sysops
